@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Determine directories
-CORE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$CORE_DIR/.." && pwd)"
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$LIB_DIR/.." && pwd)"
 
 # Load environment configuration from .env if present in project root
 if [ -f "$ROOT_DIR/.env" ]; then

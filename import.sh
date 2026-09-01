@@ -30,13 +30,43 @@ if [ ! -d "$OUTPUT_DIR" ]; then
 fi
 
 shopt -s nullglob
-DUMP_FILES=("$OUTPUT_DIR"/latest_*_dump.sql)
+RAW_DUMP_FILES=("$OUTPUT_DIR"/latest_*_dump.sql)
 
-if [ ${#DUMP_FILES[@]} -eq 0 ]; then
+if [ ${#RAW_DUMP_FILES[@]} -eq 0 ]; then
     echo "❌ No backup files found matching 'latest_*_dump.sql' inside $OUTPUT_DIR"
-    echo "   Run './export_us.sh' (or a single export script) first to generate dumps."
+    echo "   Run './export.sh' (or a single export script) first to generate dumps."
     exit 1
 fi
+
+# Prerequisite databases to restore first (satisfies cross-database view joins like view_pinpoint in clients)
+PRIORITY_DBS=("dash" "salesforce")
+
+PRIORITY_FILES=()
+STANDARD_FILES=()
+
+# First, collect priority databases in defined order
+for pdb in "${PRIORITY_DBS[@]}"; do
+    target_dump="$OUTPUT_DIR/latest_${pdb}_dump.sql"
+    if [ -f "$target_dump" ]; then
+        PRIORITY_FILES+=("$target_dump")
+    fi
+done
+
+# Then, collect the remaining dump files
+for file in "${RAW_DUMP_FILES[@]}"; do
+    is_priority=0
+    for p_file in "${PRIORITY_FILES[@]}"; do
+        if [[ "$file" == "$p_file" ]]; then
+            is_priority=1
+            break
+        fi
+    done
+    if [ $is_priority -eq 0 ]; then
+        STANDARD_FILES+=("$file")
+    fi
+done
+
+DUMP_FILES=("${PRIORITY_FILES[@]}" "${STANDARD_FILES[@]}")
 
 SUCCESS_COUNT=0
 FAILED_COUNT=0

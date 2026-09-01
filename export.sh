@@ -16,10 +16,10 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 
 shopt -s nullglob
-EXPORT_SCRIPTS=("$SCRIPT_DIR/export"/us_*.sh)
+EXPORT_SCRIPTS=("$SCRIPT_DIR/export"/*.sh)
 
 if [ ${#EXPORT_SCRIPTS[@]} -eq 0 ]; then
-    echo "❌ No export targets matching 'export/us_*.sh' found."
+    echo "❌ No export targets found inside '$SCRIPT_DIR/export/'."
     exit 1
 fi
 
