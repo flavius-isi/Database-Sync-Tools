@@ -1,0 +1,14 @@
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+# SQL Dump files (preserve folder structure via .gitkeep)
+output/*
+!output/.gitkeep
+
+# Operating system & editor metadata
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
