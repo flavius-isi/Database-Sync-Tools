@@ -4,11 +4,11 @@
 .env.*.local
 
 # SQL Dump files (preserve folder structure via .gitkeep)
-output/*
-!output/.gitkeep
+output/**/*.sql
+!output/**/.gitkeep
 
 # Operating system & editor metadata
-.DS_Store
 Thumbs.db
+.DS_Store
 .idea/
 .vscode/
