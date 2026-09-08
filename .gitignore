@@ -7,6 +7,10 @@
 output/**/*.sql
 !output/**/.gitkeep
 
+# Import logs (preserve folder structure via .gitkeep)
+import/**/*.log
+!import/**/.gitkeep
+
 # Operating system & editor metadata
 Thumbs.db
 .DS_Store

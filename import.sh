@@ -1,27 +1,27 @@
 #!/bin/bash
 
-# Determine directory paths
+# Determine directory paths and load core library
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTPUT_DIR="$SCRIPT_DIR/output"
+IMPORT_LOG_DIR="$SCRIPT_DIR/import"
 
-# Load environment configuration from .env if present
-if [ -f "$SCRIPT_DIR/.env" ]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "$SCRIPT_DIR/.env"
-    set +a
-fi
+# shellcheck source=lib/core.sh
+source "$SCRIPT_DIR/lib/core.sh"
 
-# Local MySQL environment configurations
-LOCAL_DB_HOST="${LOCAL_DB_HOST:-127.0.0.1}"
-LOCAL_DB_PORT="${LOCAL_DB_PORT:-3306}"
-LOCAL_DB_USER="${LOCAL_DB_USER:-root}"
-LOCAL_DB_PASS="${LOCAL_DB_PASS:-}"
-export MYSQL_PWD="$LOCAL_DB_PASS"
+# Load environment configuration
+load_env
+
+# Inspect local targets for banner display
+get_local_connection "mysql"
+MYSQL_DISPLAY="$LOCAL_TARGET_HOST:$LOCAL_TARGET_PORT (User: $LOCAL_TARGET_USER)"
+
+get_local_connection "mariadb"
+MARIADB_DISPLAY="$LOCAL_TARGET_HOST:$LOCAL_TARGET_PORT (User: $LOCAL_TARGET_USER)"
 
 echo "===================================================="
 echo "📥 Master Host-Based Local Database Importer"
-echo "📡 Target: $LOCAL_DB_HOST:$LOCAL_DB_PORT (User: $LOCAL_DB_USER)"
+echo "📡 MySQL Target:   $MYSQL_DISPLAY"
+echo "📡 MariaDB Target: $MARIADB_DISPLAY"
 echo "===================================================="
 
 if [ ! -d "$OUTPUT_DIR" ]; then
@@ -30,13 +30,12 @@ if [ ! -d "$OUTPUT_DIR" ]; then
 fi
 
 TARGET="${1:-}"
-AVAILABLE_HOSTS=(misc61 misc62 misc63 misc64 fpbx62)
 
 if [ -z "$TARGET" ]; then
     echo "Usage: ./import.sh <host_group|all>"
     echo ""
     echo "Available host dump targets inside output/:"
-    for h in "${AVAILABLE_HOSTS[@]}"; do
+    for h in "${KNOWN_HOSTS[@]}"; do
         if [ -d "$OUTPUT_DIR/$h" ]; then
             count=$(find "$OUTPUT_DIR/$h" -name "*.sql" 2>/dev/null | wc -l | tr -d ' ')
             echo "  - $h ($count dump files ready)"
@@ -52,7 +51,7 @@ shopt -s nullglob
 RAW_DUMP_FILES=()
 
 if [ "$TARGET" = "all" ]; then
-    for h in "${AVAILABLE_HOSTS[@]}"; do
+    for h in "${KNOWN_HOSTS[@]}"; do
         if [ -d "$OUTPUT_DIR/$h" ]; then
             for f in "$OUTPUT_DIR/$h"/*.sql; do
                 RAW_DUMP_FILES+=("$f")
@@ -78,35 +77,11 @@ if [ ${#RAW_DUMP_FILES[@]} -eq 0 ]; then
 fi
 
 # Prerequisite priority ordering to satisfy cross-database view joins
-PRIORITY_DBS=(
-    "misc64_dash"
-    "misc64_salesforce"
-    "misc62_slidev_dash"
-    "misc62_slidev_salesforce"
-)
-
-# Helper function to compute local target database name from file path
-resolve_db_name() {
-    local f="$1"
-    local host_grp
-    host_grp=$(basename "$(dirname "$f")")
-    local raw_base
-    raw_base=$(basename "$f" | sed -E 's/^latest_//' | sed -E 's/(_dump)?\.sql$//')
-    
-    if [[ "$raw_base" == "${host_grp}_"* ]]; then
-        echo "$raw_base"
-    elif [ "$host_grp" = "output" ]; then
-        echo "$raw_base"
-    else
-        echo "${host_grp}_${raw_base}"
-    fi
-}
-
 PRIORITY_FILES=()
 STANDARD_FILES=()
 
 for f in "${RAW_DUMP_FILES[@]}"; do
-    target_db=$(resolve_db_name "$f")
+    target_db=$(resolve_local_db_name "$f")
     is_p=0
     for pdb in "${PRIORITY_DBS[@]}"; do
         if [ "$target_db" = "$pdb" ]; then
@@ -114,7 +89,7 @@ for f in "${RAW_DUMP_FILES[@]}"; do
             break
         fi
     done
-    
+
     if [ $is_p -eq 1 ]; then
         PRIORITY_FILES+=("$f")
     else
@@ -132,42 +107,109 @@ echo "⚡ Beginning sequential restoration of ${#DUMP_FILES[@]} database dumps..
 
 for file in "${DUMP_FILES[@]}"; do
     filename=$(basename "$file")
-    db_name=$(resolve_db_name "$file")
+    host_grp=$(basename "$(dirname "$file")")
+    raw_base=$(basename "$file" | sed -E 's/^latest_//' | sed -E 's/(_dump)?\.sql$//')
+    db_name=$(resolve_local_db_name "$file" "$host_grp")
+
+    # Resolve database engine and local connection parameters
+    DB_ENGINE=$(get_engine_for_host "$host_grp")
+    get_local_connection "$DB_ENGINE"
+
+    export MYSQL_PWD="$LOCAL_TARGET_PASS"
+
+    # Setup log file: import/<host_group>/<db_name>.log
+    HOST_LOG_DIR="$IMPORT_LOG_DIR/$host_grp"
+    mkdir -p "$HOST_LOG_DIR"
+    LOG_FILE="$HOST_LOG_DIR/${raw_base}.log"
 
     echo ""
-    echo "📦 Restoring local database: $db_name (Source: $file)"
+    echo "📦 Restoring: $db_name (Engine: $DB_ENGINE | Target: $LOCAL_TARGET_HOST:$LOCAL_TARGET_PORT)"
+    echo "   📄 Log: import/$host_grp/${raw_base}.log"
     echo "----------------------------------------------------"
 
+    # Initialize log file
+    {
+        echo "===================================================="
+        echo "📥 Database Import Log: $db_name"
+        echo "Timestamp:    $(date)"
+        echo "Source Dump:  $file"
+        echo "Engine:       $DB_ENGINE"
+        echo "Target:       $LOCAL_TARGET_HOST:$LOCAL_TARGET_PORT (User: $LOCAL_TARGET_USER)"
+        echo "===================================================="
+        echo ""
+    } > "$LOG_FILE"
 
     # Reset schema for a clean slate
     echo "   🛠️  Creating fresh schema space..."
-    mysql -u "$LOCAL_DB_USER" -h "$LOCAL_DB_HOST" -P "$LOCAL_DB_PORT" -e "DROP DATABASE IF EXISTS \`$db_name\`; CREATE DATABASE \`$db_name\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
-    
-    if [ $? -ne 0 ]; then
-        echo "   ❌ Failed to initialize database: $db_name"
+    SCHEMA_ERR=$(mktemp)
+    "$LOCAL_CLIENT_BIN" "${LOCAL_CLIENT_ARGS[@]}" -e "DROP DATABASE IF EXISTS \`$db_name\`; CREATE DATABASE \`$db_name\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>"$SCHEMA_ERR"
+    SCHEMA_EXIT=$?
+
+    if [ $SCHEMA_EXIT -ne 0 ] || grep -E '^ERROR [0-9]+' "$SCHEMA_ERR" &>/dev/null; then
+        echo -e "\033[0;31m   ❌ Failed to initialize database: $db_name\033[0m"
+        cat "$SCHEMA_ERR" | while read -r line; do echo "      $line"; done
+        cat "$SCHEMA_ERR" >> "$LOG_FILE"
+        rm -f "$SCHEMA_ERR"
         ((FAILED_COUNT++))
         FAILED_LIST+=("$filename (Database creation failed)")
         continue
     fi
+    rm -f "$SCHEMA_ERR"
 
     # Stream dump file through sed filters:
     # 1. Strip remote DEFINER clauses so views/triggers bind locally
     # 2. Rewrite cross-database view schemas (e.g. `dash`. -> `misc64_dash`.)
-    echo "   🚚 Filtering definers and streaming data into local MySQL..."
+    echo "   🚚 Filtering definers and streaming data into local $DB_ENGINE..."
+    ERR_FILE=$(mktemp)
     sed -E \
         -e 's/DEFINER=`[^`]+`@`[^`]+`//g' \
         -e 's/`dash`\./`misc64_dash`\./g' \
         -e 's/`salesforce`\./`misc64_salesforce`\./g' \
-        "$file" | mysql -u "$LOCAL_DB_USER" -h "$LOCAL_DB_HOST" -P "$LOCAL_DB_PORT" --force "$db_name" 2>/dev/null
+        "$file" | "$LOCAL_CLIENT_BIN" "${LOCAL_CLIENT_ARGS[@]}" --force "$db_name" 2>"$ERR_FILE" >> "$LOG_FILE"
+    IMPORT_EXIT=$?
 
-    if [ $? -eq 0 ]; then
-        echo "   ✅ Sync complete: Local database '$db_name' is active."
+    if [ -s "$ERR_FILE" ]; then
+        echo "" >> "$LOG_FILE"
+        echo "=== Stderr / Execution Messages ===" >> "$LOG_FILE"
+        cat "$ERR_FILE" >> "$LOG_FILE"
+    fi
+
+    ERR_LINES=$(grep -E '^ERROR [0-9]+' "$ERR_FILE" || true)
+
+    # Verify table count
+    TABLE_COUNT=$("$LOCAL_CLIENT_BIN" "${LOCAL_CLIENT_ARGS[@]}" -N -B -e "SELECT count(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = '$db_name';" 2>/dev/null)
+    TABLE_COUNT="${TABLE_COUNT:-0}"
+
+    EXPECTS_TABLES=0
+    if grep -q -m 1 -i 'CREATE TABLE' "$file"; then
+        EXPECTS_TABLES=1
+    fi
+
+    HAS_ERROR=0
+    if [ $IMPORT_EXIT -ne 0 ] || [ -n "$ERR_LINES" ]; then
+        HAS_ERROR=1
+    elif [ "$TABLE_COUNT" -eq 0 ] && [ "$EXPECTS_TABLES" -eq 1 ]; then
+        HAS_ERROR=1
+    fi
+
+    if [ $HAS_ERROR -eq 1 ]; then
+        echo -e "\033[0;31m   ❌ Import encountered errors for: $db_name (Tables created: $TABLE_COUNT)\033[0m"
+        if [ -n "$ERR_LINES" ]; then
+            echo -e "\033[0;31m   Errors:\033[0m"
+            echo "$ERR_LINES" | head -n 10 | sed 's/^/      /'
+        fi
+        echo "   📄 Full log saved to: import/$host_grp/${raw_base}.log"
+        ((FAILED_COUNT++))
+        FAILED_LIST+=("$filename ($db_name - errors encountered)")
+    elif [ "$TABLE_COUNT" -eq 0 ]; then
+        echo "   ℹ️ Sync complete: Local database '$db_name' is active (empty database, 0 tables)."
         ((SUCCESS_COUNT++))
     else
-        echo "   ❌ Import finished with warnings/errors for: $db_name"
-        ((FAILED_COUNT++))
-        FAILED_LIST+=("$filename (SQL import errors)")
+        echo "   ✅ Sync complete: Local database '$db_name' is active ($TABLE_COUNT tables)."
+        ((SUCCESS_COUNT++))
     fi
+
+    rm -f "$ERR_FILE"
 done
 
 unset MYSQL_PWD
@@ -191,7 +233,7 @@ if [ $FAILED_COUNT -gt 0 ]; then
     exit 1
 else
     echo ""
-    echo "🎉 All databases imported successfully into local MySQL!"
+    echo "🎉 All databases imported successfully!"
     echo "===================================================="
     exit 0
 fi

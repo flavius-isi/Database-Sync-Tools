@@ -1,30 +1,23 @@
 #!/bin/bash
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/core.sh
+source "$SCRIPT_DIR/lib/core.sh"
 
 echo "===================================================="
 echo "🌍 Master Host-Based Database Export Orchestrator"
 echo "===================================================="
 
-# Pre-flight check: verify .env exists
-ENV_FILE="$SCRIPT_DIR/.env"
-if [ ! -f "$ENV_FILE" ]; then
-    echo "⚠️  Configuration error: .env file not found at $ENV_FILE"
-    echo "👉 Please copy .env.example to .env and configure your database credentials:"
-    echo "   cp .env.example .env"
-    exit 1
-fi
+# Ensure .env is present and loaded
+load_env true
 
 TARGET="${1:-}"
-
-shopt -s nullglob
-AVAILABLE_HOSTS=(misc61 misc62 misc63 misc64 fpbx62)
 
 if [ -z "$TARGET" ]; then
     echo "Usage: ./export.sh <host_group|all>"
     echo ""
     echo "Available host targets:"
-    for h in "${AVAILABLE_HOSTS[@]}"; do
+    for h in "${KNOWN_HOSTS[@]}"; do
         count=$(find "$SCRIPT_DIR/export/$h" -name "*.sh" 2>/dev/null | wc -l | tr -d ' ')
         echo "  - $h ($count database targets)"
     done
@@ -34,10 +27,11 @@ if [ -z "$TARGET" ]; then
     exit 1
 fi
 
+shopt -s nullglob
 EXPORT_SCRIPTS=()
 
 if [ "$TARGET" = "all" ]; then
-    for h in "${AVAILABLE_HOSTS[@]}"; do
+    for h in "${KNOWN_HOSTS[@]}"; do
         for script in "$SCRIPT_DIR/export/$h"/*.sh; do
             EXPORT_SCRIPTS+=("$script")
         done
@@ -46,7 +40,7 @@ else
     TARGET_DIR="$SCRIPT_DIR/export/$TARGET"
     if [ ! -d "$TARGET_DIR" ]; then
         echo "❌ Unknown host target: '$TARGET'"
-        echo "   Available targets: ${AVAILABLE_HOSTS[*]} all"
+        echo "   Available targets: ${KNOWN_HOSTS[*]} all"
         exit 1
     fi
     for script in "$TARGET_DIR"/*.sh; do
@@ -70,7 +64,7 @@ for script in "${EXPORT_SCRIPTS[@]}"; do
     host_group=$(basename "$script_dir")
     script_name=$(basename "$script")
     label="$host_group/$script_name"
-    
+
     (cd "$script_dir" && bash "./$script_name") &
     PIDS+=($!)
     SCRIPT_LABELS+=("$label")
@@ -86,9 +80,9 @@ FAILED_LIST=()
 for i in "${!PIDS[@]}"; do
     pid=${PIDS[$i]}
     label=${SCRIPT_LABELS[$i]}
-    
+
     wait "$pid"
-    
+
     if [ $? -eq 0 ]; then
         ((SUCCESS_COUNT++))
         echo "   ✅ [Thread Complete] $label finished successfully."

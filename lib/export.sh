@@ -1,67 +1,19 @@
 #!/bin/bash
 
-# Determine directories
+# Determine directory and load core library
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$LIB_DIR/.." && pwd)"
+# shellcheck source=lib/core.sh
+source "$LIB_DIR/core.sh"
 
-# Load environment configuration from .env if present in project root
-if [ -f "$ROOT_DIR/.env" ]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "$ROOT_DIR/.env"
-    set +a
-fi
+# Load environment configuration
+load_env
 
-# Resolve defaults based on HOST_GROUP if defined
-DEFAULT_HOST=""
-DEFAULT_PORT="3306"
-DEFAULT_USER=""
-DEFAULT_PASS=""
-
-case "$HOST_GROUP" in
-    misc61)
-        DEFAULT_HOST="$MISC61_HOST"
-        DEFAULT_PORT="${MISC61_PORT:-3306}"
-        DEFAULT_USER="$MISC61_USER"
-        DEFAULT_PASS="$MISC61_PASS"
-        ;;
-    misc62)
-        DEFAULT_HOST="$MISC62_HOST"
-        DEFAULT_PORT="${MISC62_PORT:-3306}"
-        DEFAULT_USER="$MISC62_USER"
-        DEFAULT_PASS="$MISC62_PASS"
-        ;;
-    misc63)
-        DEFAULT_HOST="$MISC63_HOST"
-        DEFAULT_PORT="${MISC63_PORT:-3306}"
-        DEFAULT_USER="$MISC63_USER"
-        DEFAULT_PASS="$MISC63_PASS"
-        ;;
-    misc64)
-        DEFAULT_HOST="$MISC64_HOST"
-        DEFAULT_PORT="${MISC64_PORT:-3306}"
-        DEFAULT_USER="$MISC64_USER"
-        DEFAULT_PASS="$MISC64_PASS"
-        ;;
-    fpbx62)
-        DEFAULT_HOST="$FPBX62_HOST"
-        DEFAULT_PORT="${FPBX62_PORT:-3306}"
-        DEFAULT_USER="$FPBX62_USER"
-        DEFAULT_PASS="$FPBX62_PASS"
-        ;;
-    *)
-        DEFAULT_HOST="${REMOTE_DB_HOST:-}"
-        DEFAULT_PORT="${REMOTE_DB_PORT:-3306}"
-        DEFAULT_USER="${REMOTE_DB_USER:-}"
-        DEFAULT_PASS="${REMOTE_DB_PASS:-}"
-        ;;
-esac
-
-# Resolve database parameters
-DB_HOST="${DB_HOST:-$DEFAULT_HOST}"
-DB_PORT="${DB_PORT:-$DEFAULT_PORT}"
-DB_USER="${DB_USER:-$DEFAULT_USER}"
-DB_PASS="${DB_PASS:-$DEFAULT_PASS}"
+# Resolve remote connection credentials
+get_remote_credentials "${HOST_GROUP:-}"
+DB_HOST="${DB_HOST:-$REMOTE_HOST}"
+DB_PORT="${DB_PORT:-$REMOTE_PORT}"
+DB_USER="${DB_USER:-$REMOTE_USER}"
+DB_PASS="${DB_PASS:-$REMOTE_PASS}"
 ROW_LIMIT="${ROW_LIMIT:-5000}"
 
 # Resolve remote and local database names
@@ -71,12 +23,12 @@ if [ -z "$REMOTE_DB_NAME" ]; then
     exit 1
 fi
 
+LOCAL_DB_NAME="${LOCAL_DB_NAME:-$(resolve_local_db_name "$REMOTE_DB_NAME" "${HOST_GROUP:-}")}"
+
 if [ -n "$HOST_GROUP" ]; then
-    LOCAL_DB_NAME="${LOCAL_DB_NAME:-${HOST_GROUP}_${REMOTE_DB_NAME}}"
-    OUTPUT_DIR="$ROOT_DIR/output/$HOST_GROUP"
+    OUTPUT_DIR="$PROJECT_ROOT/output/$HOST_GROUP"
 else
-    LOCAL_DB_NAME="${LOCAL_DB_NAME:-$REMOTE_DB_NAME}"
-    OUTPUT_DIR="$ROOT_DIR/output"
+    OUTPUT_DIR="$PROJECT_ROOT/output"
 fi
 
 # Validate required connection parameters
@@ -85,6 +37,12 @@ if [ -z "$DB_HOST" ] || [ -z "$DB_USER" ]; then
     echo "   Ensure host variables are configured in your .env file."
     exit 1
 fi
+
+# Resolve database engine, binaries, and extraction flags
+HOST_ENGINE=$(get_engine_for_host "${HOST_GROUP:-}")
+DUMP_BIN=$(get_dump_binary "$HOST_ENGINE")
+CLIENT_BIN=$(get_client_binary "$HOST_ENGINE")
+get_export_flags "$HOST_ENGINE"
 
 # Ensure output directory exists
 mkdir -p "$OUTPUT_DIR"
@@ -95,7 +53,8 @@ export MYSQL_PWD="$DB_PASS"
 
 echo "----------------------------------------------------"
 echo "🚀 Starting optimized extraction: $REMOTE_DB_NAME (Local DB: $LOCAL_DB_NAME)"
-echo "📡 Host: $DB_HOST:$DB_PORT (User: $DB_USER | Group: ${HOST_GROUP:-default})"
+echo "📡 Host: $DB_HOST:$DB_PORT (User: $DB_USER | Group: ${HOST_GROUP:-default} | Engine: $HOST_ENGINE)"
+echo "🔧 Tools: $DUMP_BIN / $CLIENT_BIN"
 echo "📊 Target row slice per table: $ROW_LIMIT"
 echo "----------------------------------------------------"
 
@@ -105,18 +64,30 @@ HAD_ERROR=0
 echo "SET FOREIGN_KEY_CHECKS = 0;" > "$OUTPUT_FILE"
 echo "SET UNIQUE_CHECKS = 0;" >> "$OUTPUT_FILE"
 
-# Export schema structure using zlib network compression
-echo "📦 [Structure] Fetching schema constraints for '$REMOTE_DB_NAME'..."
-mysqldump -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" --compression-algorithms=zlib --single-transaction --skip-lock-tables --no-data --no-tablespaces --set-gtid-purged=OFF "$REMOTE_DB_NAME" >> "$OUTPUT_FILE" 2>/dev/null
-if [ $? -ne 0 ]; then
-    echo "⚠️ Warning: mysqldump schema export returned non-zero for $REMOTE_DB_NAME"
+# Export schema structure
+echo "📦 [Structure] Fetching schema constraints for '$REMOTE_DB_NAME' ($HOST_ENGINE)..."
+ERR_TMP=$(mktemp)
+"$DUMP_BIN" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "${DUMP_STRUCT_FLAGS[@]}" "$REMOTE_DB_NAME" >> "$OUTPUT_FILE" 2>"$ERR_TMP"
+DUMP_STATUS=$?
+if [ $DUMP_STATUS -ne 0 ] || grep -E '^ERROR [0-9]+' "$ERR_TMP" &>/dev/null; then
+    echo "⚠️ Warning: $DUMP_BIN schema export encountered issues for $REMOTE_DB_NAME:"
+    cat "$ERR_TMP"
     HAD_ERROR=1
 fi
+rm -f "$ERR_TMP"
 
 echo "📋 [Optimization] Consolidating table metadata map..."
 META_QUERY="SELECT t.TABLE_NAME, IF(c.EXTRA LIKE '%auto_increment%', 'YES', 'NO') FROM information_schema.TABLES t LEFT JOIN information_schema.COLUMNS c ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME AND c.COLUMN_NAME = 'id' WHERE t.TABLE_SCHEMA = '$REMOTE_DB_NAME' AND t.TABLE_TYPE = 'BASE TABLE';"
 
-TABLE_MAP=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" --compression-algorithms=zlib -B -N -e "$META_QUERY" 2>/dev/null)
+ERR_TMP=$(mktemp)
+TABLE_MAP=$("$CLIENT_BIN" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "${CLIENT_QUERY_FLAGS[@]}" -B -N -e "$META_QUERY" 2>"$ERR_TMP")
+CLIENT_STATUS=$?
+if [ $CLIENT_STATUS -ne 0 ] || grep -E '^ERROR [0-9]+' "$ERR_TMP" &>/dev/null; then
+    echo "⚠️ Warning: Error querying table map for $REMOTE_DB_NAME:"
+    cat "$ERR_TMP"
+    HAD_ERROR=1
+fi
+rm -f "$ERR_TMP"
 
 if [ -z "$TABLE_MAP" ]; then
     echo "   ℹ️ No base tables found in '$REMOTE_DB_NAME' (empty database or views only)."
@@ -124,16 +95,22 @@ else
     # Loop through the table map
     while read -r table is_auto_inc; do
         if [ -z "$table" ]; then continue; fi
-        
+
+        ERR_TMP=$(mktemp)
         if [ "$is_auto_inc" = "YES" ]; then
             echo "   📥 [Data Stream] Slicing LATEST $ROW_LIMIT rows: $table"
-            mysqldump -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" --compression-algorithms=zlib --single-transaction --skip-lock-tables --no-create-info --no-tablespaces --skip-triggers --set-gtid-purged=OFF --where="1=1 ORDER BY id DESC LIMIT $ROW_LIMIT" "$REMOTE_DB_NAME" "$table" >> "$OUTPUT_FILE" 2>/dev/null
+            "$DUMP_BIN" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "${DUMP_DATA_FLAGS[@]}" --where="1=1 ORDER BY id DESC LIMIT $ROW_LIMIT" "$REMOTE_DB_NAME" "$table" >> "$OUTPUT_FILE" 2>"$ERR_TMP"
         else
             echo "   📥 [Data Stream] Slicing ANY $ROW_LIMIT rows: $table (fallback)"
-            mysqldump -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" --compression-algorithms=zlib --single-transaction --skip-lock-tables --no-create-info --no-tablespaces --skip-triggers --set-gtid-purged=OFF --where="1=1 LIMIT $ROW_LIMIT" "$REMOTE_DB_NAME" "$table" >> "$OUTPUT_FILE" 2>/dev/null
+            "$DUMP_BIN" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "${DUMP_DATA_FLAGS[@]}" --where="1=1 LIMIT $ROW_LIMIT" "$REMOTE_DB_NAME" "$table" >> "$OUTPUT_FILE" 2>"$ERR_TMP"
         fi
-        
-        if [ $? -ne 0 ]; then HAD_ERROR=1; fi
+        TABLE_STATUS=$?
+        if [ $TABLE_STATUS -ne 0 ] || grep -E '^ERROR [0-9]+' "$ERR_TMP" &>/dev/null; then
+            echo "   ⚠️ Error slicing table $table:"
+            cat "$ERR_TMP"
+            HAD_ERROR=1
+        fi
+        rm -f "$ERR_TMP"
     done <<< "$TABLE_MAP"
 fi
 
