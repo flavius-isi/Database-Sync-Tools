@@ -23,7 +23,7 @@ if [ -z "$REMOTE_DB_NAME" ]; then
     exit 1
 fi
 
-LOCAL_DB_NAME="${LOCAL_DB_NAME:-$(resolve_local_db_name "$REMOTE_DB_NAME" "${HOST_GROUP:-}")}"
+LOCAL_DB_NAME=$(resolve_local_db_name "$REMOTE_DB_NAME" "${HOST_GROUP:-}")
 
 if [ -n "$HOST_GROUP" ]; then
     OUTPUT_DIR="$PROJECT_ROOT/output/$HOST_GROUP"

@@ -40,7 +40,7 @@ To ensure **100% dev/prod parity**, the toolkit routes databases to engine-speci
 | **`misc61`** | MariaDB | `3307` | `slicrm_dev` | `misc61_slicrm_dev` |
 | **`misc62`** | MariaDB | `3307` | `slidev_dash`<br>`slidev_clients`<br>`ipla_dev_latest`<br>`slidev_salesforce`<br>`iapi61` | `misc62_slidev_dash`<br>`misc62_slidev_clients`<br>`misc62_ipla_dev_latest`<br>`misc62_slidev_salesforce`<br>`misc62_iapi61` |
 | **`misc63`** | MySQL | `3306` | `convoso_dev` | `misc63_convoso_dev` |
-| **`misc64`** | MySQL | `3306` | `dash`<br>`clients`<br>`salesforce`<br>`api`<br>`dialer`<br>`iapp2_dev_applications`<br>`client_data_imports`<br>`zz-payment-service`<br>`facebook` | `misc64_dash`<br>`misc64_clients`<br>`misc64_salesforce`<br>`misc64_api`<br>`misc64_dialer`<br>`misc64_iapp2_dev_applications`<br>`misc64_client_data_imports`<br>`misc64_zz_payment_service`<br>`misc64_facebook` |
+| **`misc64`** | MySQL | `3306` | `dash`<br>`dash_staging_dev_copy`<br>`clients`<br>`clients_staging_dev_copy`<br>`salesforce`<br>`api`<br>`dialer`<br>`iapp2_dev_applications`<br>`client_data_imports`<br>`zz-payment-service`<br>`zz-payment-service-staging-dev-copy`<br>`facebook` | `misc64_dash`<br>`misc64_dash_staging_dev_copy`<br>`misc64_clients`<br>`misc64_clients_staging_dev_copy`<br>`misc64_salesforce`<br>`misc64_api`<br>`misc64_dialer`<br>`misc64_iapp2_dev_applications`<br>`misc64_client_data_imports`<br>`misc64_zz-payment-service`<br>`misc64_zz-payment-service-staging-dev-copy`<br>`misc64_facebook` |
 | **`fpbx62`** | MySQL | `3306` | `asteriskcdrdb` | `fpbx62_asteriskcdrdb` |
 
 ---
